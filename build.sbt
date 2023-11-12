@@ -1,14 +1,9 @@
 import AssemblyKeys._
 import ReleaseTransformations._
-import com.typesafe.sbt.SbtScalariform._
-import com.typesafe.tools.mima.plugin.MimaKeys.previousArtifact
 import com.typesafe.tools.mima.plugin.MimaPlugin.mimaDefaultSettings
 import sbtassembly.Plugin._
-import scalariform.formatter.preferences._
-import summingbird._
 
 def scalaBinaryVersion(scalaVersion: String) = scalaVersion match {
-  case version if version startsWith "2.10" => "2.10"
   case version if version startsWith "2.11" => "2.11"
   case version if version startsWith "2.12" => "2.12"
   case _ => sys.error("Unsupported scala version: " + scalaVersion)
@@ -16,31 +11,44 @@ def scalaBinaryVersion(scalaVersion: String) = scalaVersion match {
 
 def isScala210x(scalaVersion: String) = scalaBinaryVersion(scalaVersion) == "2.10"
 
-val algebirdVersion = "0.12.0"
-val bijectionVersion = "0.9.1"
-val chillVersion = "0.7.3"
-val commonsHttpClientVersion = "3.1"
+def sequentialExecution: Boolean =
+  Option(System.getProperty("sequentialExecution")).map(_.toBoolean).getOrElse(false)
+
+val algebirdVersion = "0.13.0"
+val bijectionVersion = "0.9.5"
+val chillVersion = "0.8.4"
 val commonsLangVersion = "2.6"
-val finagleVersion = "6.27.0"
 val hadoopVersion = "1.2.1"
 val junitVersion = "4.11"
 val log4jVersion = "1.2.16"
 val novocodeJunitVersion = "0.10"
-val scalaCheckVersion = "1.12.2"
-val scalatestVersion = "2.2.4"
-val scaldingVersion = "0.16.0-RC2"
+val scalaCheckVersion = "1.13.4"
+val scalatestVersion = "3.0.1"
+val scaldingVersion = "0.17.2"
 val slf4jVersion = "1.6.6"
-val storehausVersion = "0.13.0"
-val stormDep = "storm" % "storm" % "0.9.0-wip15" //This project also compiles with the latest storm, which is in fact required to run the example
-val tormentaVersion = "0.11.1"
-val utilVersion = "6.26.0"
+val storehausVersion = "0.15.0"
+val stormDep = "org.apache.storm" % "storm-core" % "1.0.2"
+val tormentaVersion = "0.12.0"
+val utilVersion = "6.43.0"
+val chainVersion = "0.2.0"
 
-val extraSettings = Project.defaultSettings ++ mimaDefaultSettings ++ scalariformSettings
+val extraSettings = mimaDefaultSettings
 
-val sharedSettings = extraSettings ++ Seq(
+val executionSettings = if (sequentialExecution) {
+//  Looks like this is the only way of running tests sequentially:
+//  https://github.com/sbt/sbt/issues/882
+  Seq(
+    parallelExecution in Global := false,
+    parallelExecution in Compile := true
+  )
+} else {
+  Seq(parallelExecution in Test := true)
+}
+
+val sharedSettings = extraSettings ++ executionSettings ++ Seq(
   organization := "com.twitter",
-  scalaVersion := "2.10.5",
-  crossScalaVersions := Seq("2.10.5", "2.11.7"),
+  scalaVersion := "2.11.11",
+  crossScalaVersions := Seq("2.11.11", "2.12.2"),
   // To support hadoop 1.x
   javacOptions ++= Seq("-source", "1.6", "-target", "1.6"),
 
@@ -68,8 +76,6 @@ val sharedSettings = extraSettings ++ Seq(
     "Conjars Repository" at "http://conjars.org/repo",
     "Twitter Maven" at "http://maven.twttr.com"
   ),
-
-  parallelExecution in Test := true,
 
   scalacOptions ++= Seq(
     "-unchecked",
@@ -100,15 +106,12 @@ val sharedSettings = extraSettings ++ Seq(
     ReleaseStep(action = Command.process("sonatypeReleaseAll", _)),
     pushChanges),
 
-  publishTo <<= version { v =>
-    Some(
-      if (v.trim.toUpperCase.endsWith("SNAPSHOT"))
+  publishTo := Some(
+      if (version.value.trim.toUpperCase.endsWith("SNAPSHOT"))
         Opts.resolver.sonatypeSnapshots
       else
         Opts.resolver.sonatypeStaging
-        //"twttr" at "http://artifactory.local.twitter.com/libs-releases-local"
-    )
-  },
+    ),
 
   pomExtra := (
     <url>https://github.com/twitter/summingbird</url>
@@ -143,22 +146,19 @@ val sharedSettings = extraSettings ++ Seq(
     </developers>)
 )
 
-lazy val formattingPreferences = {
- import scalariform.formatter.preferences._
- FormattingPreferences().
-   setPreference(AlignParameters, false).
-   setPreference(PreserveSpaceBeforeArguments, true)
-}
+lazy val noPublishSettings = Seq(
+    publish := (),
+    publishLocal := (),
+    test := (),
+    publishArtifact := false
+  )
 
 lazy val summingbird = Project(
   id = "summingbird",
   base = file("."),
-  settings = sharedSettings ++ DocGen.publishSettings
-).settings(
-  test := { },
-  publish := { }, // skip publishing for this root project.
-  publishLocal := { }
-).aggregate(
+  settings = sharedSettings)
+  .settings(noPublishSettings)
+  .aggregate(
   summingbirdCore,
   summingbirdBatch,
   summingbirdBatchHadoop,
@@ -181,16 +181,79 @@ lazy val summingbird = Project(
 val unreleasedModules = Set[String]()
 
 def youngestForwardCompatible(subProj: String) =
-  Some(subProj)
-    .filterNot(unreleasedModules.contains(_))
-    .map { s => "com.twitter" % ("summingbird-" + s + "_2.10") % "0.9.0" }
+  None
+// Uncomment after release.
+//  Some(subProj)
+//    .filterNot(unreleasedModules.contains(_))
+//    .map { s => "com.twitter" % ("summingbird-" + s + "_2.11") % "0.9.0" }
+
+/**
+  * Empty this each time we publish a new version (and bump the minor number)
+  */
+val ignoredABIProblems = {
+  import com.typesafe.tools.mima.core._
+  import com.typesafe.tools.mima.core.ProblemFilters._
+  Seq(
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.memory.Memory.toStream"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.planner.DagOptimizer.FlatMapValuesFusion"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.planner.DagOptimizer.FlatMapKeyFusion"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.batch.store.HDFSMetadata.versionedStore"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.OnlinePlan.this"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.castTail"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.functionize"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.castToPair"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.processLevel"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.toFunctional"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.mutateGraph"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.planner.StripNamedNode.stripNamedNodes"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.online.OnlineDefaultConstants.com$twitter$summingbird$online$OnlineDefaultConstants$_setter_$DEFAULT_FM_MERGEABLE_WITH_SOURCE_="),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.online.OnlineDefaultConstants.DEFAULT_FM_MERGEABLE_WITH_SOURCE"),
+    exclude[MissingClassProblem]("com.twitter.summingbird.online.MergeableStoreFactoryAlgebra"),
+    exclude[MissingClassProblem]("com.twitter.summingbird.online.MergeableStoreFactoryAlgebra$"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.online.MergeableStoreFactory.mergeableStore"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.online.MergeableStoreFactory.mergeableStore"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.init"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.decoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.encoder"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.init"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.FinalFlatMap.decoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.FinalFlatMap.encoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.FinalFlatMap.this"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.IntermediateFlatMap.decoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.IntermediateFlatMap.encoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.IntermediateFlatMap.this"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.AsyncBase.init"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.online.executor.AsyncBase.execute"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.online.executor.AsyncBase.executeTick"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.AsyncBase.logger"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.Summer.init"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.Summer.this"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.Summer.decoder"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.Summer.encoder"),
+    exclude[MissingClassProblem]("com.twitter.summingbird.scalding.LookupJoin"),
+    exclude[MissingClassProblem]("com.twitter.summingbird.scalding.LookupJoin$"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.storm.BaseBolt.copy$default$8"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.storm.BaseBolt.copy"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.storm.BaseBolt.this"),
+    exclude[IncompatibleMethTypeProblem]("com.twitter.summingbird.storm.Storm.get"),
+    exclude[IncompatibleMethTypeProblem]("com.twitter.summingbird.storm.Storm.getOrElse"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.storm.BaseBolt.apply"),
+    exclude[IncompatibleResultTypeProblem]("com.twitter.summingbird.example.Memcache.client"),
+    exclude[DirectMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.notifyFailure"),
+    exclude[ReversedMissingMethodProblem]("com.twitter.summingbird.online.executor.OperationContainer.notifyFailure"),
+    exclude[IncompatibleMethTypeProblem]("com.twitter.summingbird.online.executor.AsyncBase.notifyFailure"),
+    exclude[IncompatibleMethTypeProblem]("com.twitter.summingbird.online.executor.Summer.notifyFailure"),
+    exclude[IncompatibleMethTypeProblem]("com.twitter.summingbird.TPNamedProducer.this")
+  )
+}
 
 def module(name: String) = {
   val id = "summingbird-%s".format(name)
   Project(id = id, base = file(id), settings = sharedSettings ++ Seq(
     Keys.name := id,
-    previousArtifact := youngestForwardCompatible(name))
-  )
+    mimaPreviousArtifacts := youngestForwardCompatible(name).toSet,
+    mimaBinaryIssueFilters ++= ignoredABIProblems
+  ))
 }
 
 lazy val summingbirdBatch = module("batch").settings(
@@ -233,11 +296,13 @@ lazy val summingbirdOnline = module("online").settings(
     "com.twitter" %% "algebird-core" % algebirdVersion,
     "com.twitter" %% "algebird-util" % algebirdVersion,
     "com.twitter" %% "bijection-core" % bijectionVersion,
+    "com.twitter" %% "bijection-util" % bijectionVersion,
     "com.twitter" %% "storehaus-core" % storehausVersion,
     "com.twitter" %% "chill" % chillVersion,
     "com.twitter" %% "storehaus-algebra" % storehausVersion,
     "com.twitter" %% "util-core" % utilVersion,
-    "org.slf4j" % "slf4j-log4j12" % slf4jVersion % "test"
+    "org.slf4j" % "slf4j-log4j12" % slf4jVersion % "test",
+    "org.spire-math" %% "chain" % chainVersion
   )
 ).dependsOn(
   summingbirdCore % "test->test;compile->compile",
@@ -259,6 +324,7 @@ lazy val summingbirdStorm = module("storm").settings(
     "com.twitter" %% "scalding-args" % scaldingVersion,
     "com.twitter" %% "tormenta-core" % tormentaVersion,
     "com.twitter" %% "util-core" % utilVersion,
+    "org.spire-math" %% "chain" % chainVersion,
     stormDep % "provided"
   )
 ).dependsOn(
@@ -277,7 +343,14 @@ lazy val summingbirdStormTest = module("storm-test").settings(
     "com.twitter" %% "storehaus-algebra" % storehausVersion,
     "com.twitter" %% "tormenta-core" % tormentaVersion,
     "com.twitter" %% "util-core" % utilVersion,
-    stormDep % "provided"
+    stormDep % "provided",
+
+    // Storm uses log4j2 for logs, we want to enforce usage of log4j12,
+    // to make it consistent with other tests.
+    (stormDep
+      exclude("org.slf4j", "log4j-over-slf4j")
+      exclude("org.apache.logging.log4j", "log4j-slf4j-impl")) % "test",
+    "org.slf4j" % "slf4j-log4j12" % slf4jVersion % "test"
   )
 ).dependsOn(
   summingbirdCore % "test->test;compile->compile",
@@ -347,13 +420,10 @@ lazy val summingbirdBuilder = module("builder").settings(
 
 lazy val summingbirdExample = module("example").settings(
   libraryDependencies ++= Seq(
-    "log4j" % "log4j" % log4jVersion,
-    "org.slf4j" % "slf4j-log4j12" % slf4jVersion,
-    stormDep exclude("org.slf4j", "log4j-over-slf4j") exclude("ch.qos.logback", "logback-classic"),
     "com.twitter" %% "bijection-netty" % bijectionVersion,
     "com.twitter" %% "tormenta-twitter" % tormentaVersion,
-    "com.twitter" %% "storehaus-memcache" % storehausVersion exclude("com.twitter.common", "dynamic-host-set") exclude("com.twitter.common", "service-thrift"),
-    "org.slf4j" % "slf4j-log4j12" % slf4jVersion % "test"
+    "com.twitter" %% "storehaus-memcache" % storehausVersion,
+    stormDep
   )
 ).dependsOn(summingbirdCore, summingbirdStorm)
 

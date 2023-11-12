@@ -18,7 +18,6 @@ package com.twitter.summingbird.online.executor
 
 import com.twitter.util.Future
 
-import com.twitter.bijection.Injection
 import com.twitter.summingbird.online.Externalizer
 import com.twitter.summingbird.online.FlatMapOperation
 import com.twitter.summingbird.online.option.{
@@ -26,25 +25,21 @@ import com.twitter.summingbird.online.option.{
   MaxFutureWaitTime,
   MaxEmitPerExecute
 }
+import chain.Chain
 
-class IntermediateFlatMap[T, U, S, D, RC](
+class IntermediateFlatMap[T, U, S](
     @transient flatMapOp: FlatMapOperation[T, U],
     maxWaitingFutures: MaxWaitingFutures,
     maxWaitingTime: MaxFutureWaitTime,
-    maxEmitPerExec: MaxEmitPerExecute,
-    pDecoder: Injection[T, D],
-    pEncoder: Injection[U, D]) extends AsyncBase[T, U, S, D, RC](maxWaitingFutures, maxWaitingTime, maxEmitPerExec) {
-
-  val encoder = pEncoder
-  val decoder = pDecoder
+    maxEmitPerExec: MaxEmitPerExecute) extends AsyncBase[T, U, S](maxWaitingFutures, maxWaitingTime, maxEmitPerExec) {
 
   val lockedOp = Externalizer(flatMapOp)
 
   override def apply(state: S,
-    tup: T): Future[Iterable[(List[S], Future[TraversableOnce[U]])]] =
+    tup: T): Future[Iterable[(Chain[S], Future[TraversableOnce[U]])]] =
     lockedOp.get.apply(tup).map { res =>
-      List((List(state), Future.value(res)))
+      List((Chain.single(state), Future.value(res)))
     }
 
-  override def cleanup { lockedOp.get.close }
+  override def cleanup(): Unit = lockedOp.get.close
 }

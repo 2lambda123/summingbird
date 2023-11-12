@@ -16,92 +16,45 @@ limitations under the License.
 
 package com.twitter.summingbird.online.executor
 
-import com.twitter.summingbird.online.Queue
-import com.twitter.summingbird.online.option.{ MaxWaitingFutures, MaxFutureWaitTime, MaxEmitPerExecute }
-import com.twitter.util.{ Await, Future }
-import scala.util.{ Try, Success, Failure }
-import java.util.concurrent.TimeoutException
-import org.slf4j.{ LoggerFactory, Logger }
+import com.twitter.algebird.Semigroup
+import com.twitter.summingbird.online.FutureQueue
+import com.twitter.summingbird.online.option.{ MaxEmitPerExecute, MaxFutureWaitTime, MaxWaitingFutures }
+import com.twitter.util._
+import chain.Chain
+import scala.util.Try
 
-abstract class AsyncBase[I, O, S, D, RC](maxWaitingFutures: MaxWaitingFutures, maxWaitingTime: MaxFutureWaitTime, maxEmitPerExec: MaxEmitPerExecute) extends Serializable with OperationContainer[I, O, S, D, RC] {
-
-  @transient protected lazy val logger: Logger = LoggerFactory.getLogger(getClass)
+abstract class AsyncBase[I, O, S](maxWaitingFutures: MaxWaitingFutures, maxWaitingTime: MaxFutureWaitTime, maxEmitPerExec: MaxEmitPerExecute) extends Serializable with OperationContainer[I, O, S] {
 
   /**
    * If you can use Future.value below, do so. The double Future is here to deal with
    * cases that need to complete operations after or before doing a FlatMapOperation or
    * doing a store merge
    */
-  def apply(state: S, in: I): Future[TraversableOnce[(Seq[S], Future[TraversableOnce[O]])]]
-  def tick: Future[TraversableOnce[(Seq[S], Future[TraversableOnce[O]])]] = Future.value(Nil)
+  def apply(state: S, in: I): Future[TraversableOnce[(Chain[S], Future[TraversableOnce[O]])]]
+  def tick: Future[TraversableOnce[(Chain[S], Future[TraversableOnce[O]])]] = Future.value(Nil)
 
-  private lazy val outstandingFutures = Queue.linkedNonBlocking[Future[Unit]]
-  private lazy val responses = Queue.linkedNonBlocking[(Seq[S], Try[TraversableOnce[O]])]
-
-  override def executeTick =
-    finishExecute(tick.onFailure { thr => responses.put(((Seq(), Failure(thr)))) })
-
-  override def execute(state: S, data: I) =
-    finishExecute(apply(state, data).onFailure { thr => responses.put(((List(state), Failure(thr)))) })
-
-  private def finishExecute(fIn: Future[TraversableOnce[(Seq[S], Future[TraversableOnce[O]])]]) = {
-    addOutstandingFuture(handleSuccess(fIn).unit)
-
-    // always empty the responses
-    emptyQueue
+  implicit def chainSemigroup[T]: Semigroup[Chain[T]] = new Semigroup[Chain[T]] {
+    override def plus(l: Chain[T], r: Chain[T]): Chain[T] = l ++ r
   }
 
-  private def handleSuccess(fut: Future[TraversableOnce[(Seq[S], Future[TraversableOnce[O]])]]) =
-    fut.onSuccess { iter: TraversableOnce[(Seq[S], Future[TraversableOnce[O]])] =>
+  private[executor] lazy val futureQueue = new FutureQueue[Chain[S], TraversableOnce[O]](maxWaitingFutures, maxWaitingTime)
 
-      // Collect the result onto our responses
-      val iterSize = iter.foldLeft(0) {
-        case (iterSize, (tups, res)) =>
-          res.onSuccess { t => responses.put(((tups, Success(t)))) }
-          res.onFailure { t => responses.put(((tups, Failure(t)))) }
-          // Make sure there are not too many outstanding:
-          if (addOutstandingFuture(res.unit)) {
-            iterSize + 1
-          } else {
-            iterSize
-          }
-      }
-      if (outstandingFutures.size > maxWaitingFutures.get) {
-        /*
-           * This can happen on large key expansion.
-           * May indicate maxWaitingFutures is too low.
-           */
-        logger.debug(
-          "Exceeded maxWaitingFutures({}), put {} futures", maxWaitingFutures.get, iterSize
-        )
-      }
+  override def executeTick: TraversableOnce[(Chain[S], Try[TraversableOnce[O]])] =
+    finishExecute(None, tick)
+
+  override def execute(state: S, data: I): TraversableOnce[(Chain[S], Try[TraversableOnce[O]])] =
+    finishExecute(Some(state), apply(state, data))
+
+  private def finishExecute(failStateOpt: Option[S], fIn: Future[TraversableOnce[(Chain[S], Future[TraversableOnce[O]])]]) = {
+    fIn.respond {
+      case Return(iter) => futureQueue.addAll(iter)
+      case Throw(ex) =>
+        val failState = failStateOpt match {
+          case Some(state) => Chain.single(state)
+          case None => Chain.Empty
+        }
+        futureQueue.add(failState, Future.exception(ex))
     }
-
-  private def addOutstandingFuture(fut: Future[Unit]): Boolean =
-    if (!fut.isDefined) {
-      outstandingFutures.put(fut)
-      true
-    } else {
-      false
-    }
-
-  private def forceExtraFutures() {
-    outstandingFutures.dequeueAll(_.isDefined)
-    val toForce = outstandingFutures.trimTo(maxWaitingFutures.get).toIndexedSeq
-    if (toForce.nonEmpty) {
-      try {
-        Await.ready(Future.collect(toForce), maxWaitingTime.get)
-      } catch {
-        case te: TimeoutException =>
-          logger.error("forceExtra failed on %d Futures".format(toForce.size), te)
-      }
-    }
-  }
-
-  private def emptyQueue = {
-    // don't let too many futures build up
-    forceExtraFutures()
-    // Take all results that have been placed for writing to the network
-    responses.take(maxEmitPerExec.get)
+    futureQueue.dequeue(maxEmitPerExec.get)
   }
 }

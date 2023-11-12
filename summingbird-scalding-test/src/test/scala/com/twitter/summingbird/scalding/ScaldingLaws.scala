@@ -16,39 +16,24 @@
 
 package com.twitter.summingbird.scalding
 
-import com.twitter.algebird.{ MapAlgebra, Monoid, Group, Interval, Last }
-import com.twitter.algebird.monad._
-import com.twitter.summingbird.{ Producer, TimeExtractor, TestGraphs }
+import com.twitter.algebird.Monoid
+import com.twitter.summingbird.TestGraphs
 import com.twitter.summingbird.batch._
-import com.twitter.summingbird.batch.state.HDFSState
 import com.twitter.summingbird.option.JobId
 import com.twitter.summingbird.SummingbirdRuntimeStats
 
-import java.util.TimeZone
-import java.io.File
+import com.twitter.scalding.{ Test => TestMode, _ }
 
-import com.twitter.scalding.{ Source => ScaldingSource, Test => TestMode, _ }
-import com.twitter.scalding.typed.TypedSink
-
-import org.scalacheck._
-import org.scalacheck.Prop._
-import org.scalacheck.Properties
+import org.scalacheck.Arbitrary
+import com.twitter.summingbird.ArbitraryWorkaround._
+import org.scalacheck.Cogen
 
 import org.apache.hadoop.conf.Configuration
 
-import scala.collection.JavaConverters._
-import scala.collection.mutable.{ ArrayBuffer, Buffer, HashMap => MutableHashMap, Map => MutableMap, SynchronizedBuffer, SynchronizedMap }
 import scala.util.{ Try => ScalaTry }
 
-import cascading.scheme.local.{ TextDelimited => CLTextDelimited }
-import cascading.tuple.{ Tuple, Fields, TupleEntry }
 import cascading.flow.Flow
 import cascading.stats.FlowStats
-import cascading.tap.Tap
-import cascading.scheme.NullScheme
-import org.apache.hadoop.mapred.JobConf
-import org.apache.hadoop.mapred.RecordReader
-import org.apache.hadoop.mapred.OutputCollector
 
 import org.scalatest.WordSpec
 
@@ -57,9 +42,8 @@ import org.scalatest.WordSpec
  */
 
 class ScaldingLaws extends WordSpec {
-  import MapAlgebra.sparseEquiv
-
   implicit def timeExtractor[T <: (Long, _)] = TestUtil.simpleTimeExtractor[T]
+  implicit val timestampCogen: Cogen[Timestamp] = Cogen(_.milliSinceEpoch)
 
   def sample[T: Arbitrary]: T = Arbitrary.arbitrary[T].sample.get
 
@@ -74,7 +58,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)
@@ -97,6 +81,39 @@ class ScaldingLaws extends WordSpec {
 
       assert(TestUtil.compareMaps(original, Monoid.plus(initStore, inMemory), testStore) == true)
     }
+    "match scala for single step jobs using Execution" in {
+      val original = sample[List[Int]]
+      val fn = sample[(Int) => List[(Int, Int)]]
+
+      // Add a time:
+      val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
+
+      // get time interval for the input
+      val intr = TestUtil.coveringTimeInterval(original)
+
+      val batcher = TestUtil.randomBatcher(inWithTime)
+      val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)
+
+      val inMemory = TestGraphs.singleStepInScala(batchCoveredInput)(fn)
+
+      val initStore = sample[Map[Int, Int]]
+      val testStore = TestStore[Int, Int]("test", batcher, initStore, inWithTime.size)
+      val (buffer, source) = TestSource(inWithTime)
+
+      val summer = TestGraphs.singleStepJob[Scalding, (Long, Int), Int, Int](source, testStore)(t =>
+        fn(t._2))
+
+      val ex = Scalding.toExecutionExact(
+        Scalding.dateRangeInjection.invert(intr).get,
+        summer).unit
+
+      val mode: Mode = TestMode(t => (testStore.sourceToBuffer ++ buffer).get(t))
+      ex.waitFor(Config.default, mode).get
+
+      // Now check that the inMemory ==
+
+      assert(TestUtil.compareMaps(original, Monoid.plus(initStore, inMemory), testStore, "execution") == true)
+    }
 
     "match scala single step pruned jobs" in {
       val original = sample[List[Int]]
@@ -108,7 +125,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)
@@ -151,7 +168,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)
@@ -186,7 +203,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher).toList
@@ -213,25 +230,25 @@ class ScaldingLaws extends WordSpec {
     "match scala for leftJoin jobs" in {
       val original = sample[List[Int]]
       val prejoinMap = sample[(Int) => List[(Int, Int)]]
-      val service = sample[(Int, Int) => Option[Int]]
+      val service = sample[(Timestamp, Int) => Option[Int]]
       val postJoin = sample[((Int, (Int, Option[Int]))) => List[(Int, Int)]]
 
       //Add a time
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher).toIterable
 
       // We need to keep track of time correctly to use the service
-      var fakeTime = -1
+      var fakeTime = Timestamp(-1)
       val timeIncIt = new Iterator[Int] {
         val inner = batchCoveredInput.iterator
         def hasNext = inner.hasNext
         def next = {
-          fakeTime += 1
+          fakeTime += Milliseconds(1)
           inner.next
         }
       }
@@ -239,19 +256,13 @@ class ScaldingLaws extends WordSpec {
 
       val inMemory = TestGraphs.leftJoinInScala(timeIncIt)(srvWithTime)(prejoinMap)(postJoin)
 
-      // Add a time:
-      val allKeys = original.flatMap(prejoinMap).map { _._1 }
-      val allTimes = (0 until original.size)
-      val stream = for { time <- allTimes; key <- allKeys; v = service(time, key) } yield (time.toLong, (key, v))
-
       val initStore = sample[Map[Int, Int]]
       val testStore = TestStore[Int, Int]("test", batcher, initStore, inWithTime.size)
 
-      /**
-       * Create the batched service
-       */
-      val batchedService = stream.map { case (time, v) => (Timestamp(time), v) }.groupBy { case (ts, _) => batcher.batchOf(ts) }
-      val testService = new TestService[Int, Int]("srv", batcher, batcher.batchOf(Timestamp(0)).prev, batchedService)
+      // Create the batched service
+      val allKeys = original.flatMap(prejoinMap).map { _._1 }
+      val allTimes = (0 until original.size).map(Timestamp(_))
+      val testService = TestService[Int, Int]("srv", batcher, allTimes, allKeys, service)
 
       val (buffer, source) = TestSource(inWithTime)
 
@@ -271,44 +282,38 @@ class ScaldingLaws extends WordSpec {
     "match scala for leftJoin  repeated tuple leftJoin jobs" in {
       val original = sample[List[Int]]
       val prejoinMap = sample[(Int) => List[(Int, Int)]]
-      val service = sample[(Int, Int) => Option[Int]]
+      val service = sample[(Timestamp, Int) => Option[Int]]
       val postJoin = sample[((Int, (Int, Option[Int]))) => List[(Int, Int)]]
 
       // Add a time:
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher).toIterable
 
       // We need to keep track of time correctly to use the service
-      var fakeTime = -1
+      var fakeTime = Timestamp(-1)
       val timeIncIt = new Iterator[Int] {
         val inner = batchCoveredInput.iterator
         def hasNext = inner.hasNext
         def next = {
-          fakeTime += 1
+          fakeTime += Milliseconds(1)
           inner.next
         }
       }
       val srvWithTime = { (key: Int) => service(fakeTime, key) }
       val inMemory = TestGraphs.repeatedTupleLeftJoinInScala(timeIncIt)(srvWithTime)(prejoinMap)(postJoin)
 
-      // Add a time:
+      // Create the batched service
       val allKeys = original.flatMap(prejoinMap).map { _._1 }
-      val allTimes = (0 until original.size)
-      val stream = for { time <- allTimes; key <- allKeys; v = service(time, key) } yield (time.toLong, (key, v))
+      val allTimes = (0 until original.size).map(Timestamp(_))
+      val testService = TestService("srv", batcher, allTimes, allKeys, service)
 
       val initStore = sample[Map[Int, Int]]
       val testStore = TestStore[Int, Int]("test", batcher, initStore, inWithTime.size)
-
-      /**
-       * Create the batched service
-       */
-      val batchedService = stream.map { case (time, v) => (Timestamp(time), v) }.groupBy { case (ts, _) => batcher.batchOf(ts) }
-      val testService = new TestService[Int, Int]("srv", batcher, batcher.batchOf(Timestamp(0)).prev, batchedService)
 
       val (buffer, source) = TestSource(inWithTime)
 
@@ -340,7 +345,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime2 = original2.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original1.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original1)
 
       val batcher = TestUtil.randomBatcher(inWithTime1)
       val batchCoveredInput1 = TestUtil.pruneToBatchCoveredWithTime(inWithTime1, intr, batcher)
@@ -356,7 +361,8 @@ class ScaldingLaws extends WordSpec {
       val (inMemoryA, inMemoryB) =
         TestGraphs.leftJoinWithStoreInScala(batchCoveredInput1, batchCoveredInput2)(fnAWithTime)(fnBWithTime)(postJoinWithTime)
 
-      val storeAndServiceInit = sample[Map[Int, Int]]
+      // For `inMemory` impl we assume store is empty in the beginning.
+      val storeAndServiceInit = Map[Int, Int]()
       val storeAndServiceStore = TestStore[Int, Int]("storeAndService", batcher, storeAndServiceInit, inWithTime1.size)
       val storeAndService = TestStoreService[Int, Int](storeAndServiceStore)
 
@@ -408,7 +414,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCoveredWithTime(inWithTime, intr, batcher)
@@ -458,7 +464,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCoveredWithTime(inWithTime, intr, batcher)
@@ -501,7 +507,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)
@@ -544,7 +550,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher).toList
@@ -578,7 +584,7 @@ class ScaldingLaws extends WordSpec {
       val inWithTime = original.zipWithIndex.map { case (item, time) => (time.toLong, item) }
 
       // get time interval for the input
-      val intr = TestUtil.toTimeInterval(0L, original.size.toLong)
+      val intr = TestUtil.coveringTimeInterval(original)
 
       val batcher = TestUtil.randomBatcher(inWithTime)
       val batchCoveredInput = TestUtil.pruneToBatchCovered(inWithTime, intr, batcher)

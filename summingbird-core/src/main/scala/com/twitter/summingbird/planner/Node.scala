@@ -23,7 +23,23 @@ case class NodeIdentifier(identifier: String) {
 }
 
 sealed trait Node[P <: Platform[P]] {
+  /**
+   * Members are in reverse order, i.e. if you have `leftJoin(...).flatMap(...)`
+   * first element in members will correspond to flatMap and second to leftJoin.
+   */
   val members: List[Producer[P, _]] = List()
+
+  /**
+   * @return first producer in producers chain which corresponds to this node,
+   *         i.e. if you have `leftJoin(...).flatMap(...)` on node it returns `leftJoin`.
+   */
+  def firstProducer: Option[Producer[P, _]] = members.lastOption
+
+  /**
+   * @return last producer in producers chain which corresponds to this node,
+   *         i.e. if you have `leftJoin(...).flatMap(...)` on node it returns `flatMap`.
+   */
+  def lastProducer:  Option[Producer[P, _]] = members.headOption
 
   def toSource: SourceNode[P] = SourceNode(this.members)
 
@@ -78,7 +94,41 @@ case class SourceNode[P <: Platform[P]](override val members: List[Producer[P, _
   override def shortName(sanitize: String => String) = NodeIdentifier("Source" + collapseNamedNodes(sanitize))
 }
 
-case class Dag[P <: Platform[P]](originalTail: TailProducer[P, _], producerToPriorityNames: Map[Producer[P, Any], List[String]], tail: TailProducer[P, _], producerToNode: Map[Producer[P, _], Node[P]],
+/**
+ * Summingbird converts a Directed Acyclic Graph(DAG) of Producers into a DAG of Nodes.
+ * Multiple producers can get mapped into a single Node as a result of optimization. This
+ * class keeps track of these mappings and bunch of other information. The Dag in question
+ * here is pivoted on a single tail producer, in other words it is the view from a single
+ * TailProducer, other TailProducers may have their own view.
+ *
+ * Dag objects aren't typically constructed directly, but rather through the companion
+ * object helpers, which also generate unique names for each Node.
+ *
+ * @param originalTail                The TailProducer before stripping out named nodes.
+ * @param producerToPriorityNames     Map every producer to list of names that apply to it.
+ *                                    These are the names provided by named nodes.
+ *                                    e.g. .name("mynode"). Names flow from tail to source.
+ *                                    Nearest name takes priority.
+ * @param tail                        The TailProducer after stripping out named nodes.
+ * @param producerToNode              Maps producer to node. Many producers can map into a
+ *                                    single node.
+ * @param nodes                       All nodes of the Dag.
+ * @param nodeToName                  Summingbird assigns a unique name to every node. This
+ *                                    is the mapping of nodes to their unique names.
+ *                                    Note that this name is different from the name used for
+ *                                    applying named options.
+ * @param nameToNode                  Reverse of above mapping. Mapping of names to nodes.
+ * @param dependenciesOfM             Nodes this node immediately depends on. In other words,
+ *                                    the parents of this node in node graph.
+ * @param dependantsOfM               Nodes that immediately depend on the given node. In
+ *                                    other words the children of this node in node graph.
+ * @tparam P                          Platform, e.g. Scalding, Storm, ConcurrentMemory.
+ */
+case class Dag[P <: Platform[P]](
+    originalTail: TailProducer[P, _],
+    producerToPriorityNames: Map[Producer[P, Any], List[String]],
+    tail: TailProducer[P, _],
+    producerToNode: Map[Producer[P, _], Node[P]],
     nodes: List[Node[P]],
     nodeToName: Map[Node[P], String] = Map[Node[P], String](),
     nameToNode: Map[String, Node[P]] = Map[String, Node[P]](),
@@ -135,12 +185,22 @@ case class Dag[P <: Platform[P]](originalTail: TailProducer[P, _], producerToPri
 
 object Dag {
   /** The default name sanitizing */
-  def apply[P <: Platform[P], T](originalTail: TailProducer[P, Any], producerToPriorityNames: Map[Producer[P, Any], List[String]], tail: TailProducer[P, Any],
-    registry: List[Node[P]]): Dag[P] = apply[P, T](originalTail, producerToPriorityNames, tail,
-    registry,
-    { (s: String) => s.replaceAll("""[\[\]]|\-""", "|") })
+  def apply[P <: Platform[P], T](
+    originalTail: TailProducer[P, Any],
+    producerToPriorityNames: Map[Producer[P, Any], List[String]],
+    tail: TailProducer[P, Any],
+    registry: List[Node[P]]): Dag[P] =
+    apply[P, T](
+      originalTail,
+      producerToPriorityNames,
+      tail,
+      registry,
+      { (s: String) => s.replaceAll("""[\[\]]|\-""", "|") })
 
-  def apply[P <: Platform[P], T](originalTail: TailProducer[P, Any], producerToPriorityNames: Map[Producer[P, Any], List[String]], tail: TailProducer[P, Any],
+  def apply[P <: Platform[P], T](
+    originalTail: TailProducer[P, Any],
+    producerToPriorityNames: Map[Producer[P, Any], List[String]],
+    tail: TailProducer[P, Any],
     registry: List[Node[P]],
     sanitizeName: String => String): Dag[P] = {
 

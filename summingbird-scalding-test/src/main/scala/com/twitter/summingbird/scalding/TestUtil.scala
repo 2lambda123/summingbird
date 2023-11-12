@@ -16,16 +16,11 @@
 
 package com.twitter.summingbird.scalding
 
-import com.twitter.algebird.{ MapAlgebra, Monoid, Group, Interval, Last }
-import com.twitter.algebird.monad._
+import com.twitter.algebird.{ Monoid, Group, Interval }
 import com.twitter.summingbird.batch._
 import com.twitter.summingbird.TimeExtractor
 
-import com.twitter.scalding.{ Source => ScaldingSource, Test => TestMode, _ }
-
 import org.scalacheck._
-import org.scalacheck.Prop._
-import org.scalacheck.Properties
 
 object TestUtil {
   def simpleTimeExtractor[T <: (Long, _)]: TimeExtractor[T] = TimeExtractor(_._1)
@@ -41,6 +36,12 @@ object TestUtil {
       println("producer extra keys: " + (produced.keySet -- inMemory.keySet))
       println("producer missing keys: " + (inMemory.keySet -- produced.keySet))
       println("Difference: " + diffMap)
+      if (produced.isEmpty) println("produced isEmpty")
+      val correct = (inMemory.keySet ++ produced.keySet).foldLeft(produced) { (m, k) =>
+        if (inMemory.get(k) == produced.get(k)) m - k
+        else m
+      }
+      println("correct keys: " + correct)
     }
     !wrong
   }
@@ -59,6 +60,12 @@ object TestUtil {
       println("written batches: " + testStore.writtenBatches)
       println("earliest unwritten time: " + testStore.batcher.earliestTimeOf(testStore.writtenBatches.max.next))
       println("Difference: " + diffMap)
+      if (produced.isEmpty) println("produced isEmpty")
+      val correct = (inMemory.keySet ++ produced.keySet).foldLeft(produced) { (m, k) =>
+        if (inMemory.get(k) == produced.get(k)) m - k
+        else m
+      }
+      println("correct keys: " + correct)
     }
     !wrong
   }
@@ -79,11 +86,11 @@ object TestUtil {
   }
 
   /**
-   * This converts the min and max times to a time interval.
-   * maxTime is an exclusive upper bound.
+   * Returns non empty time interval which covers elements, assuming they have
+   * timestamps from 0 to `elements.size - 1`.
    */
-  def toTimeInterval(minTime: Long, maxTime: Long): Interval[Timestamp] =
-    Interval.leftClosedRightOpen(Timestamp(minTime), Timestamp(maxTime))
+  def coveringTimeInterval(elements: List[Any]): Interval[Timestamp] =
+    Interval.leftClosedRightOpen(Timestamp(0), Timestamp(Math.max(1, elements.size)))
 
   val simpleBatcher = new Batcher {
     def batchOf(d: Timestamp) =

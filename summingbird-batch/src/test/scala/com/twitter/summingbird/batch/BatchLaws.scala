@@ -19,12 +19,11 @@ package com.twitter.summingbird.batch
 import org.scalacheck.{ Arbitrary, Gen, Properties }
 import org.scalacheck.Prop._
 
-import java.util.concurrent.TimeUnit
-
-import com.twitter.algebird.Interval
+import com.twitter.algebird._
 
 object BatchLaws extends Properties("BatchID") {
   import Generators._
+  import OrderedFromOrderingExt._
 
   property("BatchIDs should RT to String") =
     forAll { batch: BatchID => batch == BatchID(batch.toString) }
@@ -35,6 +34,21 @@ object BatchLaws extends Properties("BatchID") {
   property("BatchID should respect ordering") =
     forAll { (a: Long, b: Long) =>
       a.compare(b) == implicitly[Ordering[BatchID]].compare(BatchID(a), BatchID(b))
+    }
+
+  property("BatchID.next matches Successible.next(b)") =
+    forAll { b: BatchID =>
+      Successible.next(b) match {
+        case Some(bnext) => bnext == b.next
+        case None => b.next <= b // we are wrapping around
+      }
+    }
+  property("BatchID.prev matches Predecessible.prev(b)") =
+    forAll { b: BatchID =>
+      Predecessible.prev(b) match {
+        case Some(bprev) => bprev == b.prev
+        case None => b.prev >= b // we are wrapping around
+      }
     }
 
   property("BatchID should respect addition and subtraction") =
@@ -54,10 +68,17 @@ object BatchLaws extends Properties("BatchID") {
     forAll(Arbitrary.arbitrary[BatchID], Gen.choose(0L, 1000L)) { (b1: BatchID, diff: Long) =>
       // We can't enumerate too much:
       val b2 = b1 + diff
-      val interval = Interval.leftClosedRightOpen(b1, b2.next) match {
-        case Left(i) => i
-        case Right(i) => i
+
+      val interval = if (Ordering[BatchID].lteq(b1, b2)) {
+        if (b2 != BatchID(Long.MaxValue)) {
+          Intersection(InclusiveLower(b1), ExclusiveUpper(b2.next))
+        } else {
+          Intersection(InclusiveLower(b1), InclusiveUpper(b2))
+        }
+      } else {
+        Empty[BatchID]()
       }
+
       (BatchID.toInterval(BatchID.range(b1, b2)) == Some(interval)) &&
         BatchID.toIterable(interval).toList == BatchID.range(b1, b2).toList
     }

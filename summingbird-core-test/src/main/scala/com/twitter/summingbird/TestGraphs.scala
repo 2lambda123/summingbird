@@ -68,7 +68,7 @@ object TestGraphs {
                  * This is a lookup, but there is no value for this key
                  */
               val joinResult = Some((time, (u, None)))
-              val sumResult = Semigroup.sumOption(valuesFn(time, (u, None))).map(v => (time, (None, v._2)))
+              val sumResult = Semigroup.sumOption(valuesFn((time, (u, None)))).map(v => (time, (None, v._2)))
               (joinResult, sumResult)
             case ((_, Some((_, (optv, v)))), (time, Left(u))) =>
               /*
@@ -76,7 +76,7 @@ object TestGraphs {
                  */
               val currentV = Some(sum(optv, v)) // isn't u already a sum and optu prev value?
               val joinResult = Some((time, (u, currentV)))
-              val sumResult = Semigroup.sumOption(valuesFn(time, (u, currentV))).map(v => (time, (currentV, v._2)))
+              val sumResult = Semigroup.sumOption(valuesFn((time, (u, currentV)))).map(v => (time, (currentV, v._2)))
               (joinResult, sumResult)
             case ((_, None), (time, Right(v))) =>
               /*
@@ -211,19 +211,27 @@ object TestGraphs {
       .flatMapValues(postJoinFn)
       .sumByKey(store)
 
-  def leftJoinWithStoreInScala[T1, T2, U, JoinedU: Monoid, K: Ordering, V: Monoid](source1: TraversableOnce[T1], source2: TraversableOnce[T2])(simpleFM1: T1 => TraversableOnce[(Long, (K, JoinedU))])(simpleFM2: T2 => TraversableOnce[(Long, (K, U))])(postJoinFn: ((Long, (K, (U, Option[JoinedU])))) => TraversableOnce[(Long, (K, V))]): (Map[K, JoinedU], Map[K, V]) = {
+  def leftJoinWithStoreInScala[T1, T2, U, JoinedU: Monoid, K: Ordering, V: Monoid](
+    source1: TraversableOnce[T1],
+    source2: TraversableOnce[T2]
+  )(
+    simpleFM1: T1 => TraversableOnce[(Long, (K, JoinedU))]
+  )(
+    simpleFM2: T2 => TraversableOnce[(Long, (K, U))]
+  )(
+    postJoinFn: ((Long, (K, (U, Option[JoinedU])))) => TraversableOnce[(Long, (K, V))]
+  ): (Map[K, JoinedU], Map[K, V]) = {
+    val flatMappedSource1 = source1.flatMap(simpleFM1).toList
 
     val firstStore = MapAlgebra.sumByKey(
-      source1
-        .flatMap(simpleFM1)
+      flatMappedSource1
         .map { case (_, kju) => kju } // drop the time from the key for the store
     )
 
     // create the delta stream
     val sumStream: Iterable[(Long, (K, (Option[JoinedU], JoinedU)))] =
-      source1
-        .flatMap(simpleFM1)
-        .toList.groupBy(_._1)
+      flatMappedSource1
+        .groupBy(_._1)
         .mapValues {
           _.map { case (time, (k, joinedu)) => (k, joinedu) }
             .groupBy(_._1)

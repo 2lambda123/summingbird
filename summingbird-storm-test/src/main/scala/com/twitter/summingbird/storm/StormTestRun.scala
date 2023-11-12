@@ -17,16 +17,13 @@
 package com.twitter.summingbird.storm
 
 import com.twitter.algebird.Semigroup
-import backtype.storm.{ Config => BacktypeStormConfig, LocalCluster, Testing }
+import org.apache.storm.{ ILocalCluster, Testing, Config => BacktypeStormConfig }
 import com.twitter.summingbird.online.executor.InflightTuples
-import backtype.storm.testing.{ CompleteTopologyParam, MockedSources }
+import org.apache.storm.testing.{ CompleteTopologyParam, MockedSources, TestJob }
 import com.twitter.summingbird.storm.spout.TraversableSpout
 import com.twitter.summingbird.online.option._
 import com.twitter.summingbird.option._
 import com.twitter.summingbird._
-import com.twitter.summingbird.planner._
-import com.twitter.tormenta.spout.Spout
-import scala.collection.JavaConverters._
 import java.security.Permission
 import com.twitter.util.Duration
 
@@ -35,10 +32,11 @@ import com.twitter.util.Duration
  */
 private[storm] class MySecurityManager extends SecurityManager {
   override def checkExit(status: Int): Unit = {
-    throw new SecurityException();
+    throw new SecurityException()
   }
-  override def checkAccess(t: Thread) = {}
-  override def checkPermission(p: Permission) = {}
+  override def checkAccess(thread: Thread): Unit = {}
+  override def checkPermission(perm: Permission): Unit = {}
+  override def checkPermission(perm: Permission, context: AnyRef): Unit = {}
 }
 
 /*
@@ -58,16 +56,15 @@ object StormTestRun {
 
   private def tryRun(plannedTopology: PlannedTopology): Unit = {
     //Before running the external Command
-    val oldSecManager = System.getSecurityManager()
-    System.setSecurityManager(new MySecurityManager());
+    val oldSecManager = System.getSecurityManager
+    System.setSecurityManager(new MySecurityManager())
     InflightTuples.reset()
     try {
-      val cluster = new LocalCluster()
-      cluster.submitTopology("test topology", plannedTopology.config, plannedTopology.topology)
-      Thread.sleep(4500)
-      cluster.killTopology("test topology")
-      Thread.sleep(1500)
-      cluster.shutdown
+      Testing.withSimulatedTimeLocalCluster(new TestJob {
+        override def run(cluster: ILocalCluster): Unit = {
+          Testing.completeTopology(cluster, plannedTopology.topology, completeTopologyParam(plannedTopology.config))
+        }
+      })
     } finally {
       System.setSecurityManager(oldSecManager)
     }
@@ -81,7 +78,7 @@ object StormTestRun {
 
   def simpleRun[T, K, V: Semigroup](original: List[T], mkJob: (Producer[Storm, T], Storm#Store[K, V]) => TailProducer[Storm, Any]): TestStore[K, V] = {
 
-    implicit def extractor[T]: TimeExtractor[T] = TimeExtractor(_ => 0L)
+    implicit def extractor[T1]: TimeExtractor[T1] = TimeExtractor(_ => 0L)
 
     val (id, store) = TestStore.createStore[K, V]()
 

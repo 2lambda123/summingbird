@@ -23,9 +23,8 @@ import com.twitter.summingbird.planner.DagOptimizer
 import com.twitter.algebird.{ Monoid, Semigroup }
 import com.twitter.summingbird._
 import com.twitter.summingbird.option.JobId
-import scala.collection.mutable.Buffer
 import scala.concurrent.{ ExecutionContext, Future }
-import java.util.concurrent.{ BlockingQueue, LinkedBlockingQueue, ConcurrentHashMap }
+import java.util.concurrent.{ BlockingQueue, ConcurrentHashMap }
 
 object ConcurrentMemory {
   implicit def toSource[T](traversable: TraversableOnce[T]): Producer[ConcurrentMemory, T] =
@@ -195,8 +194,8 @@ class ConcurrentMemory(implicit jobID: JobId = JobId("default.concurrent.memory.
             go(fn)
 
           case WrittenProducer(prod, queue) =>
-            def go[T](in: Prod[T], sink: Sink[T]) = {
-              val (planned, targets) = maybeFanout[T]
+            def go[U](in: Prod[U], sink: Sink[U]) = {
+              val (planned, targets) = maybeFanout[U]
               val phys = Writer(sink, targets)
               (planned + (that -> phys), phys)
             }

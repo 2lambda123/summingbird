@@ -18,10 +18,9 @@ package com.twitter.summingbird.store
 
 import com.twitter.algebird.{ MapMonoid, Monoid, Semigroup }
 import com.twitter.algebird.util.UtilAlgebras._
-import com.twitter.bijection.Pivot
 import com.twitter.storehaus.{ FutureCollector, FutureOps, ReadableStore }
-import com.twitter.storehaus.algebra.{ Mergeable, MergeableStore }
-import com.twitter.summingbird.batch.{ BatchID, Batcher, Timestamp }
+import com.twitter.storehaus.algebra.Mergeable
+import com.twitter.summingbird.batch.{ BatchID, Batcher }
 import com.twitter.util.Future
 
 import scala.collection.breakOut
@@ -45,7 +44,7 @@ class ClientMergeable[K, V: Semigroup](
     batcher: Batcher,
     batchesToKeep: Int,
     onlineKeyFilter: K => Boolean,
-    collector: FutureCollector[(K, Iterable[BatchID])]) extends Mergeable[(K, BatchID), V] {
+    collector: FutureCollector) extends Mergeable[(K, BatchID), V] {
 
   def readable: ClientStore[K, V] =
     new ClientStore(offlineStore, onlineStore, batcher, batchesToKeep, onlineKeyFilter, collector)

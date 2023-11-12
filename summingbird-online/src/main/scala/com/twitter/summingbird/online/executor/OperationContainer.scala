@@ -16,16 +16,15 @@ limitations under the License.
 
 package com.twitter.summingbird.online.executor
 
+import chain.Chain
 import scala.util.Try
-import com.twitter.bijection.Injection
 
-trait OperationContainer[Input, Output, State, WireFmt, RuntimeContext] {
-  def decoder: Injection[Input, WireFmt]
-  def encoder: Injection[Output, WireFmt]
-  def executeTick: TraversableOnce[(Seq[State], Try[TraversableOnce[Output]])]
+trait OperationContainer[-Input, +Output, State] {
+  def init(): Unit = {}
+  def cleanup(): Unit = {}
+
+  def executeTick: TraversableOnce[(Chain[State], Try[TraversableOnce[Output]])]
   def execute(state: State,
-    data: Input): TraversableOnce[(Seq[State], Try[TraversableOnce[Output]])]
-  def init(ctx: RuntimeContext) {}
-  def cleanup {}
-  def notifyFailure(inputs: Seq[State], e: Throwable) {}
+    data: Input): TraversableOnce[(Chain[State], Try[TraversableOnce[Output]])]
+  def notifyFailure(inputs: Chain[State], e: Throwable): Unit = {}
 }

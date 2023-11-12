@@ -17,15 +17,14 @@ limitations under the License.
 package com.twitter.summingbird.builder
 
 import com.twitter.algebird.{ Monoid, Semigroup }
-import com.twitter.bijection.{ Codec, Injection }
+import com.twitter.bijection.Codec
 import com.twitter.chill.IKryoRegistrar
 import com.twitter.chill.java.IterableRegistrar
 import com.twitter.storehaus.algebra.MergeableStore
 import com.twitter.storehaus.ReadableStore
 import com.twitter.summingbird._
 import com.twitter.summingbird.batch.{ BatchID, Batcher }
-import com.twitter.summingbird.option.CacheSize
-import com.twitter.summingbird.scalding.{ Scalding, Service, ScaldingEnv, Sink }
+import com.twitter.summingbird.scalding.{ Scalding, ScaldingEnv }
 import com.twitter.summingbird.scalding.batch.BatchedStore
 import com.twitter.summingbird.service.CompoundService
 import com.twitter.summingbird.sink.{ CompoundSink, BatchedSinkFromOffline }
@@ -35,7 +34,6 @@ import com.twitter.summingbird.online._
 import com.twitter.summingbird.storm.{
   Storm,
   StormEnv,
-  StormSource,
   StormSink
 }
 import java.io.Serializable
@@ -108,10 +106,10 @@ case class SourceBuilder[T: Manifest] private (
 
   def write[U](sink: CompoundSink[U])(conversion: T => TraversableOnce[U])(implicit batcher: Batcher, mf: Manifest[U]): SourceBuilder[T] = {
     val newNode =
-      node.flatMap(conversion).write(
+      node.flatMap(conversion).write((
         sink.offline.map(new BatchedSinkFromOffline[U](batcher, _)),
         sink.online.map { supplier => new StormSink[U] { lazy val toFn = supplier() } }
-      )
+      ))
     copy(
       node = node.either(newNode).flatMap[T] {
         case Left(t) => Some(t)
@@ -122,10 +120,10 @@ case class SourceBuilder[T: Manifest] private (
 
   def write(sink: CompoundSink[T])(implicit batcher: Batcher): SourceBuilder[T] =
     copy(
-      node = node.write(
+      node = node.write((
         sink.offline.map(new BatchedSinkFromOffline[T](batcher, _)),
         sink.online.map { supplier => new StormSink[T] { lazy val toFn = supplier() } }
-      )
+      ))
     )
 
   def leftJoin[K, V, JoinedValue](service: CompoundService[K, JoinedValue])(implicit ev: T <:< (K, V), keyMf: Manifest[K], valMf: Manifest[V], joinedMf: Manifest[JoinedValue]): SourceBuilder[(K, (V, Option[JoinedValue]))] =

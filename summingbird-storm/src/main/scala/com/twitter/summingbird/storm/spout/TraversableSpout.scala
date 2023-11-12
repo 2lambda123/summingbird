@@ -16,13 +16,9 @@
 
 package com.twitter.summingbird.storm.spout
 
-import backtype.storm.testing.CompletableSpout
-import backtype.storm.topology.IRichSpout
-import backtype.storm.topology.OutputFieldsDeclarer
-import backtype.storm.tuple.Fields
-import backtype.storm.tuple.Values
+import org.apache.storm.tuple.Values
 import com.twitter.tormenta.spout.Spout
-import java.util.{ List => JList, ArrayList }
+import java.util.ArrayList
 import collection.JavaConverters._
 
 object TraversableSpout {
@@ -31,7 +27,7 @@ object TraversableSpout {
 }
 
 class TraversableSpout[+T](items: TraversableOnce[T], fieldName: String) extends Spout[T] {
-  private def wrap[T](t: T) = new Values(t.asInstanceOf[AnyRef])
+  private def wrap(t: Any) = new Values(t.asInstanceOf[AnyRef])
 
   lazy val tupleList = items.toList
   lazy val javaList = new ArrayList(tupleList.map(wrap).asJava)

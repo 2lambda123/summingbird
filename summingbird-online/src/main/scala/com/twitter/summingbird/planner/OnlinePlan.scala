@@ -17,8 +17,11 @@
 package com.twitter.summingbird.planner
 
 import com.twitter.summingbird._
+import scala.reflect.ClassTag
+import com.twitter.summingbird.online.OnlineDefaultConstants
+import com.twitter.summingbird.online.option.{ Grouping, LeftJoinGrouping }
 
-class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
+class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V], nameMap: Map[Producer[P, _], List[String]], options: Map[String, Options]) {
   private type Prod[T] = Producer[P, T]
   private type VisitedStore = Set[Prod[_]]
   private type CNode = Node[P]
@@ -27,6 +30,13 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
   private val depData = Dependants(tail)
   private val forkedNodes = depData.nodes
     .filter(depData.fanOut(_).exists(_ > 1)).toSet
+
+  private def get[T <: AnyRef: ClassTag](dep: Producer[P, _]): Option[(String, T)] =
+    Options.getFirst[T](options, nameMap(dep))
+
+  private def getOrElse[T <: AnyRef: ClassTag](dep: Producer[P, _], default: T): T =
+    get[T](dep).map { case (_, t) => t }.getOrElse(default)
+
   private def distinctAddToList[T](l: List[T], n: T): List[T] = if (l.contains(n)) l else (n :: l)
 
   // We don't merge flatMaps or joins with source.
@@ -38,8 +48,7 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
       case OptionMappedProducer(producer, _) => true
       case Source(_) => true
       case AlsoProducer(_, _) => true
-      // The rest are flatMaps, joins, merges or tails
-      case FlatMappedProducer(_, _) => false
+      case FlatMappedProducer(_, _) => getOrElse(dep, OnlineDefaultConstants.DEFAULT_FM_MERGEABLE_WITH_SOURCE).get
       case ValueFlatMappedProducer(_, _) => false
       case KeyFlatMappedProducer(_, _) => false
       case LeftJoinedProducer(_, _) => false
@@ -74,6 +83,14 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
   private def dependsOnSummerProducer(p: Prod[_]): Boolean =
     Producer.dependenciesOf(p).collect { case s: Summer[_, _, _] => s }.headOption.isDefined
 
+  private def isGroupedLeftJoin(p: Prod[_]): Boolean = p match {
+    case LeftJoinedProducer(_, _) =>
+      get[LeftJoinGrouping](p).map { case (_, leftJoinGrouping) =>
+        leftJoinGrouping.get
+      } == Some(Grouping.Group)
+    case _ => false
+  }
+
   /*
    * Note that this is transitive: we check on p, then we call this fn
    * for all dependencies of p
@@ -81,6 +98,12 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
   private def allTransDepsMergeableWithSource(p: Prod[_]): Boolean =
     mergableWithSource(p) && Producer.dependenciesOf(p).forall(allTransDepsMergeableWithSource)
 
+  /*
+   *   This method is used when we need to check if the map-side aggregation node has to be added.
+   *   If the source is followed by summer, we create a FlatMapNode() for map-side aggregation.
+   */
+  private def isSourceFollowedBySummer(curr: Prod[_], dep: Prod[_]): Boolean =
+    hasSummerAsDependantProducer(curr) && allTransDepsMergeableWithSource(dep)
   /**
    * This is the main planning loop that goes bottom up planning into CNodes.
    * The default empty node is a FlatMapNode. When a node is fully planned, we put it
@@ -135,6 +158,7 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
            * we want to push things higher up in the Dag, not further down.
            */
           case SummerNode(_) if !noOpProducer(dep) => true
+
           /*
            * Currently, SummerNodes cannot have any other logic than sum. So, we check to see
            * if this node has something that is not no-op, and if the next node will be a summer, we split
@@ -143,15 +167,18 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
           case _ if (!noOpNode(activeBolt) && dependsOnSummerProducer(currentProducer)) => true
           /*
            * This should possibly be improved, but currently, we force a FlatMapNode just before a
-           * summer (to handle map-side aggregation). This check is here to prevent us from merging
-           * this current node all the way up to the source.
+           * summer (to handle map-side aggregation) unless the currentProducer is configured to be merged into Source.
+           * This check is here to prevent us from merging this current node all the way up to the source.
            */
-          case FlatMapNode(_) if hasSummerAsDependantProducer(currentProducer) && allTransDepsMergeableWithSource(dep) => true
+
+          case FlatMapNode(_) if isSourceFollowedBySummer(currentProducer, dep) => !(getOrElse(currentProducer, OnlineDefaultConstants.DEFAULT_FM_MERGEABLE_WITH_SOURCE).get)
+
           /*
            * if the current node can't be merged with a source, but the transitive deps can
            * then split now.
            */
           case _ if ((!mergableWithSource(currentProducer)) && allTransDepsMergeableWithSource(dep)) => true
+          case _ if isGroupedLeftJoin(currentProducer) => true
           case _ => false
         }
         // Note the currentProducer is *ALREADY* a part of activeBolt
@@ -219,9 +246,12 @@ class OnlinePlan[P <: Platform[P], V](tail: Producer[P, V]) {
 }
 
 object OnlinePlan {
-  def apply[P <: Platform[P], T](tail: TailProducer[P, T]): Dag[P] = {
+
+  def apply[P <: Platform[P], T](tail: TailProducer[P, T]): Dag[P] = apply(tail, Map.empty)
+
+  def apply[P <: Platform[P], T](tail: TailProducer[P, T], options: Map[String, Options]): Dag[P] = {
     val (nameMap, strippedTail) = StripNamedNode(tail)
-    val planner = new OnlinePlan(strippedTail)
+    val planner = new OnlinePlan(strippedTail, nameMap, options)
     val nodesSet = planner.nodeSet
 
     // The nodes are added in a source -> summer way with how we do list prepends

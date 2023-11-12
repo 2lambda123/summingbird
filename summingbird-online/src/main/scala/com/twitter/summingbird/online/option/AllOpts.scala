@@ -2,7 +2,8 @@ package com.twitter.summingbird.online.option
 
 import com.twitter.util.Duration
 import com.twitter.algebird.Semigroup
-import com.twitter.algebird.util.summer.AsyncSummer
+import com.twitter.algebird.util.summer.{ AsyncSummer, Incrementor }
+import com.twitter.summingbird.{ Counter, Name }
 
 case class OnlineSuccessHandler(handlerFn: Unit => Unit)
 
@@ -74,6 +75,15 @@ case class SoftMemoryFlushPercent(get: Float) {
 }
 
 /**
+ * Enable early crush down of values, without emitting, for the caches that support this.
+ */
+case class CompactValues(toBoolean: Boolean)
+
+object CompactValues {
+  def default = CompactValues(false)
+}
+
+/**
  * ValueCombinerCacheSize is used in caches that support it as a trigger to crush down a high locality of
  * values without emitting.
  */
@@ -89,8 +99,26 @@ trait SummerBuilder extends Serializable {
 
 /**
  * The SummerConstructor option, set this instead of CacheSize, AsyncPoolSize, etc.. to provide how to construct the aggregation for this bolt
+ * @see [[Summers]] for useful [[SummerWithCountersBuilder]]s.
  */
-case class SummerConstructor(get: SummerBuilder)
+case class SummerConstructor(get: SummerWithCountersBuilder)
+
+/**
+ * Returned [[SummerBuilder]] should be [[Serializable]], while [[SummerWithCountersBuilder]]
+ * should be used only on submitter node.
+ */
+trait SummerWithCountersBuilder {
+  def create(counter: Name => Incrementor): SummerBuilder
+}
+
+object SummerConstructor {
+  def apply(get: SummerBuilder): SummerConstructor =
+    SummerConstructor(DeprecatedSummerConstructorSpec(get))
+
+  private case class DeprecatedSummerConstructorSpec(get: SummerBuilder) extends SummerWithCountersBuilder {
+    override def create(counter: (Name) => Incrementor): SummerBuilder = get
+  }
+}
 
 /**
  * How many instances/tasks of this flatmap task should be spawned in the environment
@@ -113,3 +141,26 @@ case class SummerParallelism(parHint: Int)
  * which are set by SummerParallelism.
  */
 case class SummerBatchMultiplier(get: Int)
+
+/**
+ * This option configures the flatMap to be merged into spout when set to true.
+ */
+case class FMMergeableWithSource(get: Boolean)
+
+object FMMergeableWithSource {
+  val default: FMMergeableWithSource = FMMergeableWithSource(false)
+}
+
+case class LeftJoinGrouping(get: Grouping)
+
+object LeftJoinGrouping {
+  val Grouped: LeftJoinGrouping = LeftJoinGrouping(Grouping.Group)
+  val Shuffled: LeftJoinGrouping = LeftJoinGrouping(Grouping.Shuffle)
+}
+
+sealed trait Grouping
+
+object Grouping {
+  case object Shuffle extends Grouping
+  case object Group extends Grouping
+}
